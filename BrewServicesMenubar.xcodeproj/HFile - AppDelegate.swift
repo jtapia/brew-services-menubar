@@ -1,0 +1,3 @@
+if let customView = menuItem.view as? LiquidGlassMenuItemView {
+    // ... existing code ...
+}

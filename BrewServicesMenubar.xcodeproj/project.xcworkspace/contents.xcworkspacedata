@@ -2,6 +2,15 @@
 <Workspace
    version = "1.0">
    <FileRef
-      location = "self:BrewServicesMenubar.xcodeproj">
+      location = "self:">
+   </FileRef>
+   <FileRef
+      location = "group:HFile - AppDelegate.swift">
+   </FileRef>
+   <FileRef
+      location = "group:LFile - AppDelegate.swift, LiquidGlassMenuItemView.swift">
+   </FileRef>
+   <FileRef
+      location = "group:LFile - LiquidGlassMenuItemView.swift">
    </FileRef>
 </Workspace>

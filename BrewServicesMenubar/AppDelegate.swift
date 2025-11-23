@@ -8,40 +8,26 @@
 
 import Cocoa
 
-fileprivate func statusDot(color: NSColor, diameter: CGFloat = 10) -> NSImage {
-    // Standard menu item height on macOS is typically around 22pt
-    let menuItemHeight: CGFloat = 22
-    let canvas: CGFloat = max(diameter, menuItemHeight)
-    let size = NSSize(width: canvas, height: canvas)
-    let image = NSImage(size: size)
-
-    image.lockFocus()
-
-    // Center the circle within the canvas, with a slight downward nudge for visual alignment
-    let verticalNudge: CGFloat = -0.3
-    let origin = NSPoint(x: (canvas - diameter) / 2.0, y: (canvas - diameter) / 2.0 - verticalNudge)
-    let rect = NSRect(origin: origin, size: NSSize(width: diameter, height: diameter))
-    let path = NSBezierPath(ovalIn: rect)
-
-    color.setFill()
-    path.fill()
-
-    image.unlockFocus()
-    image.isTemplate = false
-    return image
-}
-
 let brewExecutableKey = "brewExecutable"
 
 class Service: NSObject {
     var name = ""
     var state = "unknown" // "started", "stopped", "none", "error", "unknown"
     var user = ""
+    var plistPath: String? // Path to plist file if service is configured
 
-    init(name: String, state: String, user: String) {
+    init(name: String, state: String, user: String, plistPath: String? = nil) {
         self.name = name
         self.state = state
         self.user = user
+        self.plistPath = plistPath
+    }
+
+    // Check if service is configured but not running (likely failed to start)
+    var isConfiguredButStopped: Bool {
+        // Normalize state to lowercase for comparison
+        let normalizedState = state.lowercased()
+        return (normalizedState == "stopped" || normalizedState == "none") && plistPath != nil
     }
 }
 
@@ -59,6 +45,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: -1)
     var services: [Service]?
     var isMenuOpen = false
+    var isLoadingServices = false
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // Homebrew can now be located in two different locations depending on how it was installed and what architecture the computer is running
@@ -92,10 +79,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func handleClick(_ sender: Any) {
         // Get the service name from the view
         var serviceName: String?
+        var view: LiquidGlassMenuItemView?
 
-        if let view = sender as? LiquidGlassMenuItemView {
-            serviceName = view.title
+        if let v = sender as? LiquidGlassMenuItemView {
+            serviceName = v.title
+            view = v
         }
+
+        // Show loading indicator
+        view?.setLoading(true)
 
         // Find the actual service state to toggle it properly
         if let serviceName = serviceName, let services = services {
@@ -112,10 +104,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func handleRestartClick(_ sender: Any) {
         // Get the service from the menu item's representedObject
         var service: Service?
+        var view: LiquidGlassMenuItemView?
 
         if let menuItem = sender as? NSMenuItem {
             service = menuItem.representedObject as? Service
+            view = menuItem.view as? LiquidGlassMenuItemView
         }
+
+        // Show loading indicator
+        view?.setLoading(true)
 
         if let service = service {
             controlService(service.name, state: "restart")
@@ -140,11 +137,99 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func handleMenuOpen(_ sender: AnyObject?) {
         isMenuOpen = true
-        queryServicesAndUpdateMenu()
+        // Refresh when menu opens to get latest status
+        if !isLoadingServices {
+            queryServicesAndUpdateMenu()
+        }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // Refresh services when menu is about to open
+        if !isLoadingServices {
+            queryServicesAndUpdateMenu()
+        }
     }
 
     func menuDidClose(_ menu: NSMenu) {
         isMenuOpen = false
+    }
+
+    // Refresh tracking areas to restore hover functionality after menu updates
+    private func refreshTrackingAreas() {
+        // Use multiple async dispatches to ensure proper timing
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // First pass: layout all views
+            for item in self.statusMenu.items {
+                if let view = item.view as? LiquidGlassMenuItemView {
+                    view.layoutSubtreeIfNeeded()
+                }
+            }
+
+            // Second pass: update tracking areas after a small delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self = self else { return }
+                for item in self.statusMenu.items {
+                    if let view = item.view as? LiquidGlassMenuItemView {
+                        view.updateTrackingAreas()
+                    }
+                }
+            }
+        }
+    }
+
+    // Helper method to get dot color for a service state
+    private func dotColor(for service: Service) -> NSColor {
+        // Normalize state to lowercase for comparison
+        let normalizedState = service.state.lowercased()
+
+        switch normalizedState {
+        case "started":
+            return .systemGreen
+        case "stopped", "none":
+            // Yellow if configured but stopped (likely failed to start)
+            // Red if stopped without plist (not configured or intentionally stopped)
+            return service.isConfiguredButStopped ? .systemYellow : .systemRed
+        case "unknown", "error":
+            return .systemYellow
+        default:
+            // For any other state, if service has plist but isn't started, show yellow
+            // This handles edge cases where state might be unexpected
+            if service.plistPath != nil && normalizedState != "started" {
+                return .systemYellow
+            }
+            return .systemYellow
+        }
+    }
+
+    //
+    // Show loading menu with only loading indicator and quit option
+    //
+    func showLoadingMenu() {
+        statusMenu.removeAllItems()
+
+        // Add top spacer for liquid glass effect
+        statusMenu.addItem(LiquidGlassMenuItemView.spacer())
+
+        // Add loading indicator
+        statusMenu.addItem(LiquidGlassMenuItemView.loading(message: "Loading services..."))
+
+        statusMenu.addItem(LiquidGlassMenuItemView.separator())
+
+        // Add quit item
+        let quitItem = LiquidGlassMenuItemView.menuItem(
+            title: "Quit",
+            dotColor: nil,
+            isEnabled: true,
+            action: #selector(AppDelegate.handleQuit(_:)),
+            target: self,
+            accessoryText: "⌘Q"
+        )
+        statusMenu.addItem(quitItem)
+
+        // Add bottom spacer for liquid glass effect
+        statusMenu.addItem(LiquidGlassMenuItemView.spacer())
     }
 
     //
@@ -153,47 +238,57 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateMenuInPlace() {
         guard let services = services else { return }
 
+        // Check if we're coming from a loading state (menu has very few items)
+        // If so, rebuild the entire menu
+        let expectedMinimumItems = services.count * 2 + 5 // services + alt items + separators + quit + spacers
+        if statusMenu.items.count < expectedMinimumItems {
+            updateMenu()
+            return
+        }
+
         let user = NSUserName()
 
         // Update each service item
+        // Start at index 1 to skip the top spacer
         for (index, service) in services.enumerated() {
-            let itemIndex = index * 2 // Each service has a main item and an alternate item
+            let itemIndex = (index * 2) + 1 // +1 for top spacer, *2 for main + alternate items
 
-            if itemIndex < statusMenu.items.count {
-                let menuItem = statusMenu.items[itemIndex]
+            // Safety check - ensure we don't go out of bounds
+            guard itemIndex < statusMenu.items.count else {
+                // If items are out of sync, rebuild the menu
+                updateMenu()
+                return
+            }
 
-                // Update the dot color based on current state
-                let dotColor: NSColor
-                switch service.state {
-                case "started":
-                    dotColor = .systemGreen
-                case "stopped", "none":
-                    dotColor = .systemRed
-                case "unknown":
-                    dotColor = .systemYellow
-                default:
-                    dotColor = .systemYellow
+            let menuItem = statusMenu.items[itemIndex]
+
+            // Update the dot color based on current state
+            let dotColor = self.dotColor(for: service)
+
+            // Update the custom view's dot color and stop loading
+            if let customView = menuItem.view as? LiquidGlassMenuItemView {
+                customView.updateDotColor(dotColor)
+                customView.setLoading(false)
+            }
+
+            // Update enabled state
+            let isEnabled = !(service.user != "" && service.user != user)
+            menuItem.isEnabled = isEnabled
+
+            // Update alternate item too (itemIndex + 1)
+            let altItemIndex = itemIndex + 1
+            if altItemIndex < statusMenu.items.count {
+                let altMenuItem = statusMenu.items[altItemIndex]
+                if let altCustomView = altMenuItem.view as? LiquidGlassMenuItemView {
+                    altCustomView.updateDotColor(dotColor)
+                    altCustomView.setLoading(false)
                 }
-
-                // Update the custom view's dot color
-                if let customView = menuItem.view as? LiquidGlassMenuItemView {
-                    customView.updateDotColor(dotColor)
-                }
-
-                // Update enabled state
-                let isEnabled = !(service.user != "" && service.user != user)
-                menuItem.isEnabled = isEnabled
-
-                // Update alternate item too
-                if itemIndex + 1 < statusMenu.items.count {
-                    let altMenuItem = statusMenu.items[itemIndex + 1]
-                    if let altCustomView = altMenuItem.view as? LiquidGlassMenuItemView {
-                        altCustomView.updateDotColor(dotColor)
-                    }
-                    altMenuItem.isEnabled = isEnabled
-                }
+                altMenuItem.isEnabled = isEnabled
             }
         }
+
+        // Refresh tracking areas to restore hover functionality after updates
+        refreshTrackingAreas()
     }
 
     //
@@ -201,6 +296,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     //
     func updateMenu(notFound: Bool = false, error: Bool = false) {
         statusMenu.removeAllItems()
+
+        // Add top spacer for liquid glass effect
+        statusMenu.addItem(LiquidGlassMenuItemView.spacer())
+
+        if isLoadingServices {
+            // Show loading state while fetching services
+            let loadingItem = LiquidGlassMenuItemView.loading(message: "Loading services...")
+            statusMenu.addItem(loadingItem)
+
+            statusMenu.addItem(LiquidGlassMenuItemView.separator())
+
+            let quitItem = LiquidGlassMenuItemView.menuItem(
+                title: "Quit",
+                dotColor: nil,
+                isEnabled: true,
+                action: #selector(AppDelegate.handleQuit(_:)),
+                target: self,
+                accessoryText: "⌘Q"
+            )
+            statusMenu.addItem(quitItem)
+
+            // Add bottom spacer
+            statusMenu.addItem(LiquidGlassMenuItemView.spacer())
+            return
+        }
 
         if notFound {
             let item = LiquidGlassMenuItemView.menuItem(
@@ -227,19 +347,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else if let services = services {
             let user = NSUserName()
             for service in services {
-                // Add colored status dot before the service name
-                let dotColor: NSColor
-                switch service.state {
-                case "started":
-                    dotColor = .systemGreen
-                case "stopped", "none":
-                    dotColor = .systemRed
-                case "unknown":
-                    dotColor = .systemYellow
-                default:
-                    dotColor = .systemYellow
-                }
-
+                // Get dot color for service state
+                let dotColor = self.dotColor(for: service)
                 let isEnabled = !(service.user != "" && service.user != user)
 
                 // Use LiquidGlassMenuItemView for custom menu items that don't auto-close
@@ -282,7 +391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 statusMenu.addItem(item)
             }
             else {
-                statusMenu.addItem(.separator())
+                statusMenu.addItem(LiquidGlassMenuItemView.separator())
 
                 let startAllItem = LiquidGlassMenuItemView.menuItem(
                     title: "Start all",
@@ -327,17 +436,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             accessoryText: "⌘Q"
         )
         statusMenu.addItem(quitItem)
+
+        // Add bottom spacer for liquid glass effect
+        statusMenu.addItem(LiquidGlassMenuItemView.spacer())
+
+        // Refresh tracking areas after menu is fully built
+        refreshTrackingAreas()
     }
 
     func queryServicesAndUpdateMenu() {
+        // Prevent concurrent brew calls
+        if isLoadingServices {
+            return
+        }
+
         do {
             let launchPath = try self.brewExecutable()
+
+            // Set loading state and show loading menu if menu is open
+            if isMenuOpen && !isLoadingServices {
+                isLoadingServices = true
+                showLoadingMenu()
+            } else if !isLoadingServices {
+                // Also set loading state even if menu is closed to prevent concurrent calls
+                isLoadingServices = true
+            }
 
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let result = try self.serviceStates(launchPath: launchPath)
                     DispatchQueue.main.async {
                         self.services = result
+                        self.isLoadingServices = false
 
                         // If menu is open, update in place; otherwise rebuild
                         if self.isMenuOpen {
@@ -347,12 +477,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         }
                     }
                 } catch {
-                    if !self.isMenuOpen {
-                        self.updateMenu(error: true)
+                    DispatchQueue.main.async {
+                        self.isLoadingServices = false
+                        if !self.isMenuOpen {
+                            self.updateMenu(error: true)
+                        } else {
+                            self.updateMenuInPlace()
+                        }
                     }
                 }
             }
         } catch {
+            isLoadingServices = false
             if !isMenuOpen {
                 updateMenu(notFound: true)
             }
@@ -390,10 +526,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 task.launchPath = try self.brewExecutable()
             } catch {
-                let alert = NSAlert.init()
-                alert.alertStyle = .critical
-                alert.messageText = "Error locating Homebrew"
-                alert.runModal()
+                DispatchQueue.main.async {
+                    let alert = NSAlert.init()
+                    alert.alertStyle = .critical
+                    alert.messageText = "Error locating Homebrew"
+                    alert.runModal()
+
+                    // Clear loading state on error
+                    self.queryServicesAndUpdateMenu()
+                }
                 return
             }
             task.arguments = ["services", state, name]
@@ -408,7 +549,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     alert.messageText = "Could not \(state) \(name)"
                     alert.informativeText = "You will need to manually resolve the issue."
                     alert.runModal()
+
+                    // Refresh menu after error
+                    self.queryServicesAndUpdateMenu()
                 }
+                return
             }
 
             // Delay the menu update to avoid conflicts with menu being open
@@ -452,10 +597,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func parseService(_ raw:String) -> Service {
         let parts = raw.components(separatedBy: " ").filter() { $0 != "" }
-        return Service(
-            name: parts.count >= 1 ? parts[0] : "",
-            state: parts.count >= 2 ? parts[1] : "unknown",
-            user: parts.count >= 3 ? parts[2] : ""
+
+        let name = parts.count >= 1 ? parts[0] : ""
+        // Parse state - ensure it's lowercase for consistency
+        let state = parts.count >= 2 ? parts[1].lowercased() : "unknown"
+        let user = parts.count >= 3 ? parts[2] : ""
+
+        // Extract plist path if present (usually the last part after user)
+        // Format: "servicename state user /path/to/plist"
+        var plistPath: String? = nil
+        if parts.count >= 4 {
+            // Join remaining parts as the plist path might contain spaces
+            plistPath = parts[3..<parts.count].joined(separator: " ")
+        }
+
+        let service = Service(
+            name: name,
+            state: state,
+            user: user,
+            plistPath: plistPath
         )
+
+        // Debug: Log service state for troubleshooting
+        if name == "mariadb" {
+            print("[AppDelegate] Parsed mariadb - state: '\(state)', plistPath: \(plistPath ?? "nil"), isConfiguredButStopped: \(service.isConfiguredButStopped), dotColor: \(dotColor(for: service))")
+        }
+
+        return service
     }
 }

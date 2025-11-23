@@ -1,0 +1,3 @@
+visualEffectValue: .menu {
+    blendingColor(.blue)
+}

@@ -2,6 +2,7 @@ import AppKit
 
 public class LiquidGlassMenuItemView: NSView {
     private let visualEffectView: NSVisualEffectView
+    private let highlightView: NSView  // Changed from NSVisualEffectView to properly show accent color
     private let dotView: DotView?
     private let titleLabel: NSTextField
     private let accessoryLabel: NSTextField?
@@ -11,6 +12,7 @@ public class LiquidGlassMenuItemView: NSView {
     private var clickGestureRecognizer: NSClickGestureRecognizer!
     private let isEnabled: Bool
     private var trackingArea: NSTrackingArea?
+    private var isProcessing: Bool = false
 
     private class DotView: NSView {
         private let dotLayer = CALayer()
@@ -51,6 +53,7 @@ public class LiquidGlassMenuItemView: NSView {
                 target: AnyObject? = nil,
                 accessoryText: String? = nil) {
         self.visualEffectView = NSVisualEffectView()
+        self.highlightView = NSView()  // Changed from NSVisualEffectView
         self.isEnabled = isEnabled
         self.action = action
         self.target = target
@@ -73,6 +76,7 @@ public class LiquidGlassMenuItemView: NSView {
         super.init(frame: .zero)
 
         setupVisualEffectView()
+        setupHighlightView()
         setupSubviews()
         setupGestureRecognizer()
         updateColors()
@@ -80,6 +84,31 @@ public class LiquidGlassMenuItemView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupHighlightView() {
+        highlightView.translatesAutoresizingMaskIntoConstraints = false
+        highlightView.wantsLayer = true
+        highlightView.isHidden = true
+        
+        // Configure the layer for proper blending
+        if let layer = highlightView.layer {
+            // Use selectedContentBackgroundColor which is designed for menu selections
+            // This automatically provides the correct accent color without vibrancy interference
+            layer.backgroundColor = NSColor.selectedContentBackgroundColor.cgColor
+            
+            // Add a subtle corner radius to match modern macOS design
+            layer.cornerRadius = 4.0
+        }
+
+        visualEffectView.addSubview(highlightView)
+
+        NSLayoutConstraint.activate([
+            highlightView.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor, constant: 4),
+            highlightView.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor, constant: -4),
+            highlightView.topAnchor.constraint(equalTo: visualEffectView.topAnchor, constant: 2),
+            highlightView.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor, constant: -2),
+        ])
     }
 
     private func setupVisualEffectView() {
@@ -100,7 +129,6 @@ public class LiquidGlassMenuItemView: NSView {
     }
 
     private func setupSubviews() {
-        wantsLayer = true
         layer?.masksToBounds = true
 
         // Dot view
@@ -188,6 +216,8 @@ public class LiquidGlassMenuItemView: NSView {
 
     private func setupGestureRecognizer() {
         clickGestureRecognizer = NSClickGestureRecognizer(target: self, action: #selector(didClick))
+        // Allow the gesture to work without closing the menu
+        clickGestureRecognizer.delaysPrimaryMouseButtonEvents = false
         addGestureRecognizer(clickGestureRecognizer)
     }
 
@@ -198,14 +228,21 @@ public class LiquidGlassMenuItemView: NSView {
             removeTrackingArea(trackingArea)
         }
 
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow]
+        // Use .activeAlways to ensure tracking works even when menu is key window
+        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeAlways]
         trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
         addTrackingArea(trackingArea!)
+    }
+    
+    public override func layout() {
+        super.layout()
+        // Update tracking areas whenever layout changes
+        updateTrackingAreas()
     }
 
     public override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
-        if isEnabled {
+        if isEnabled && !isProcessing {
             setHighlighted(true)
         }
     }
@@ -215,8 +252,25 @@ public class LiquidGlassMenuItemView: NSView {
         setHighlighted(false)
     }
 
+    public override func mouseUp(with event: NSEvent) {
+        // Handle clicks within bounds
+        guard isEnabled, !isProcessing, bounds.contains(convert(event.locationInWindow, from: nil)) else {
+            super.mouseUp(with: event)
+            return
+        }
+
+        // Perform the action
+        if let action = action, let target = target {
+            NSApp.sendAction(action, to: target, from: self)
+        }
+
+        // Note: Not calling super.mouseUp(with: event) prevents the menu from closing
+        // This allows the user to see the loading indicator and updated state
+    }
+
     @objc private func didClick() {
-        guard isEnabled, let action = action, let target = target else { return }
+        // This is called by the gesture recognizer as a backup
+        guard isEnabled, !isProcessing, let action = action, let target = target else { return }
         NSApp.sendAction(action, to: target, from: self)
     }
 
@@ -225,19 +279,8 @@ public class LiquidGlassMenuItemView: NSView {
     }
 
     public func setHighlighted(_ highlighted: Bool) {
-        if #available(macOS 10.14, *) {
-            visualEffectView.isEmphasized = highlighted
-        } else {
-            // Fallback on earlier versions
-            visualEffectView.isEmphasized = highlighted
-        }
-
-        if highlighted {
-            // Use system accent color with appropriate alpha for visibility
-            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.25).cgColor
-        } else {
-            layer?.backgroundColor = nil
-        }
+        // Show/hide the custom highlight view with system accent color
+        highlightView.isHidden = !highlighted
     }
 
     public override func updateLayer() {
@@ -246,7 +289,9 @@ public class LiquidGlassMenuItemView: NSView {
     }
 
     private func updateColors() {
-        if isEnabled {
+        let effectivelyEnabled = isEnabled && !isProcessing
+
+        if effectivelyEnabled {
             if let dotView = dotView {
                 dotView.alphaValue = 1
             }
@@ -266,10 +311,20 @@ public class LiquidGlassMenuItemView: NSView {
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateColors()
+        updateHighlightColor()
+    }
+
+    private func updateHighlightColor() {
+        // Update highlight to use selectedContentBackgroundColor which matches system accent
+        if let layer = highlightView.layer {
+            layer.backgroundColor = NSColor.selectedContentBackgroundColor.cgColor
+        }
     }
 
     public func updateDotColor(_ color: NSColor) {
         dotView?.updateColor(color)
+        // Ensure tracking areas are active after updates
+        updateTrackingAreas()
     }
 
     public var title: String {
@@ -279,6 +334,8 @@ public class LiquidGlassMenuItemView: NSView {
     // MARK: - Loading State
 
     public func setLoading(_ loading: Bool) {
+        isProcessing = loading
+
         if loading {
             dotView?.isHidden = true
             loadingIndicator.startAnimation(nil)
@@ -286,10 +343,23 @@ public class LiquidGlassMenuItemView: NSView {
             loadingIndicator.stopAnimation(nil)
             dotView?.isHidden = false
         }
+
+        // Update the visual state to reflect that the item is now disabled during processing
+        updateColors()
+
+        // Remove highlight if we're now processing
+        if loading {
+            setHighlighted(false)
+        }
+        
+        // Force tracking areas to be reconfigured after loading state changes
+        needsUpdateConstraints = true
+        layoutSubtreeIfNeeded()
+        updateTrackingAreas()
     }
 
     public var isLoading: Bool {
-        return loadingIndicator.isHidden == false && loadingIndicator.doubleValue > 0
+        return isProcessing
     }
 
     // MARK: - Convenience builder
@@ -337,19 +407,54 @@ public class LiquidGlassMenuItemView: NSView {
 
         return menuItem
     }
+
+    public static func spacer() -> NSMenuItem {
+        let spacerView = LiquidGlassSpacerView()
+        spacerView.translatesAutoresizingMaskIntoConstraints = false
+
+        let menuItem = NSMenuItem()
+        menuItem.view = spacerView
+        menuItem.isEnabled = false
+
+        NSLayoutConstraint.activate([
+            spacerView.widthAnchor.constraint(equalToConstant: 220),
+            spacerView.heightAnchor.constraint(equalToConstant: 6)
+        ])
+
+        return menuItem
+    }
+
+    public static func loading(message: String = "Loading services...") -> NSMenuItem {
+        let loadingView = LiquidGlassLoadingView(message: message)
+        loadingView.translatesAutoresizingMaskIntoConstraints = false
+
+        let menuItem = NSMenuItem()
+        menuItem.view = loadingView
+        menuItem.isEnabled = false
+
+        NSLayoutConstraint.activate([
+            loadingView.widthAnchor.constraint(equalToConstant: 220),
+            loadingView.heightAnchor.constraint(equalToConstant: 40)
+        ])
+
+        return menuItem
+    }
 }
 
 // MARK: - Liquid Glass Separator
 
 private class LiquidGlassSeparatorView: NSView {
     private let visualEffectView: NSVisualEffectView
-    private let separatorLine: NSBox
+    private let separatorLine: CALayer
 
     override init(frame frameRect: NSRect) {
         self.visualEffectView = NSVisualEffectView()
-        self.separatorLine = NSBox()
+        self.separatorLine = CALayer()
 
         super.init(frame: frameRect)
+
+        wantsLayer = true
+        layer?.masksToBounds = false
 
         setupVisualEffectView()
         setupSeparatorLine()
@@ -365,6 +470,8 @@ private class LiquidGlassSeparatorView: NSView {
         visualEffectView.blendingMode = .withinWindow
         visualEffectView.state = .active
         visualEffectView.wantsLayer = true
+        visualEffectView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        visualEffectView.layer?.masksToBounds = false
         addSubview(visualEffectView)
 
         NSLayoutConstraint.activate([
@@ -376,20 +483,165 @@ private class LiquidGlassSeparatorView: NSView {
     }
 
     private func setupSeparatorLine() {
-        separatorLine.translatesAutoresizingMaskIntoConstraints = false
-        separatorLine.boxType = .separator
-        visualEffectView.addSubview(separatorLine)
+        separatorLine.backgroundColor = NSColor.separatorColor.cgColor
+        visualEffectView.layer?.addSublayer(separatorLine)
 
-        NSLayoutConstraint.activate([
-            separatorLine.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor, constant: 12),
-            separatorLine.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor, constant: -12),
-            separatorLine.centerYAnchor.constraint(equalTo: visualEffectView.centerYAnchor),
-            separatorLine.heightAnchor.constraint(equalToConstant: 1),
-        ])
+        updateSeparatorColor()
+    }
+
+    private func updateSeparatorColor() {
+        // Use the system separator color which adapts to light/dark mode
+        separatorLine.backgroundColor = NSColor.separatorColor.cgColor
+    }
+
+    override func layout() {
+        super.layout()
+
+        // Position the separator line in the center
+        let lineHeight: CGFloat = 1.0
+        let horizontalInset: CGFloat = 12.0
+
+        separatorLine.frame = CGRect(
+            x: horizontalInset,
+            y: (bounds.height - lineHeight) / 2.0,
+            width: bounds.width - (horizontalInset * 2),
+            height: lineHeight
+        )
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateSeparatorColor()
     }
 
     override var intrinsicContentSize: NSSize {
         return NSSize(width: NSView.noIntrinsicMetric, height: 12)
+    }
+}
+
+// MARK: - Liquid Glass Spacer
+
+private class LiquidGlassSpacerView: NSView {
+    private let visualEffectView: NSVisualEffectView
+
+    override init(frame frameRect: NSRect) {
+        self.visualEffectView = NSVisualEffectView()
+
+        super.init(frame: frameRect)
+
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        setupVisualEffectView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupVisualEffectView() {
+        visualEffectView.translatesAutoresizingMaskIntoConstraints = false
+        visualEffectView.material = .menu
+        visualEffectView.blendingMode = .withinWindow
+        visualEffectView.state = .active
+        visualEffectView.wantsLayer = true
+        visualEffectView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        visualEffectView.layer?.masksToBounds = false
+        addSubview(visualEffectView)
+
+        NSLayoutConstraint.activate([
+            visualEffectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            visualEffectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            visualEffectView.topAnchor.constraint(equalTo: topAnchor),
+            visualEffectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        return NSSize(width: NSView.noIntrinsicMetric, height: 6)
+    }
+}
+
+// MARK: - Liquid Glass Loading View
+
+private class LiquidGlassLoadingView: NSView {
+    private let visualEffectView: NSVisualEffectView
+    private let loadingIndicator: NSProgressIndicator
+    private let messageLabel: NSTextField
+
+    init(message: String) {
+        self.visualEffectView = NSVisualEffectView()
+        self.loadingIndicator = NSProgressIndicator()
+        self.messageLabel = NSTextField(labelWithString: message)
+
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        setupVisualEffectView()
+        setupLoadingIndicator()
+        setupMessageLabel()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupVisualEffectView() {
+        visualEffectView.translatesAutoresizingMaskIntoConstraints = false
+        visualEffectView.material = .menu
+        visualEffectView.blendingMode = .withinWindow
+        visualEffectView.state = .active
+        visualEffectView.wantsLayer = true
+        visualEffectView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        visualEffectView.layer?.masksToBounds = false
+        addSubview(visualEffectView)
+
+        NSLayoutConstraint.activate([
+            visualEffectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            visualEffectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            visualEffectView.topAnchor.constraint(equalTo: topAnchor),
+            visualEffectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    private func setupLoadingIndicator() {
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        loadingIndicator.style = .spinning
+        loadingIndicator.controlSize = .small
+        loadingIndicator.isDisplayedWhenStopped = false
+        loadingIndicator.startAnimation(nil)
+        visualEffectView.addSubview(loadingIndicator)
+
+        NSLayoutConstraint.activate([
+            loadingIndicator.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor, constant: 12),
+            loadingIndicator.centerYAnchor.constraint(equalTo: visualEffectView.centerYAnchor),
+            loadingIndicator.widthAnchor.constraint(equalToConstant: 16),
+            loadingIndicator.heightAnchor.constraint(equalToConstant: 16),
+        ])
+    }
+
+    private func setupMessageLabel() {
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        messageLabel.font = NSFont.systemFont(ofSize: 12)
+        messageLabel.textColor = NSColor.secondaryLabelColor
+        messageLabel.isEditable = false
+        messageLabel.isSelectable = false
+        messageLabel.isBezeled = false
+        messageLabel.drawsBackground = false
+        messageLabel.lineBreakMode = .byTruncatingTail
+        visualEffectView.addSubview(messageLabel)
+
+        NSLayoutConstraint.activate([
+            messageLabel.leadingAnchor.constraint(equalTo: loadingIndicator.trailingAnchor, constant: 8),
+            messageLabel.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor, constant: -12),
+            messageLabel.centerYAnchor.constraint(equalTo: visualEffectView.centerYAnchor)
+        ])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        return NSSize(width: NSView.noIntrinsicMetric, height: 40)
     }
 }
 
