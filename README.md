@@ -4,7 +4,7 @@
 
 This reads the [homebrew services](https://github.com/Homebrew/homebrew-services) command, showing you the status of your services and allowing them to be started, stopped and restarted.
 
-<img width="276" height="404" alt="Screenshot 2025-11-22 at 6 32 22 p m" src="https://github.com/user-attachments/assets/9a49a013-23d8-4090-8db7-dec8d7cbb3fe" />
+<img width="289" height="405" alt="Screenshot 2025-11-22 at 9 56 05 p m" src="https://github.com/user-attachments/assets/693aa9a2-8f86-4480-8d66-3d28da67cbc5" />
 
 ## Install
 
