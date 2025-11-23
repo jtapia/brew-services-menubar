@@ -8,12 +8,41 @@
 
 import Cocoa
 
+fileprivate func statusDot(color: NSColor, diameter: CGFloat = 10) -> NSImage {
+    // Standard menu item height on macOS is typically around 22pt
+    let menuItemHeight: CGFloat = 22
+    let canvas: CGFloat = max(diameter, menuItemHeight)
+    let size = NSSize(width: canvas, height: canvas)
+    let image = NSImage(size: size)
+
+    image.lockFocus()
+
+    // Center the circle within the canvas, with a slight downward nudge for visual alignment
+    let verticalNudge: CGFloat = -0.3
+    let origin = NSPoint(x: (canvas - diameter) / 2.0, y: (canvas - diameter) / 2.0 - verticalNudge)
+    let rect = NSRect(origin: origin, size: NSSize(width: diameter, height: diameter))
+    let path = NSBezierPath(ovalIn: rect)
+
+    color.setFill()
+    path.fill()
+
+    image.unlockFocus()
+    image.isTemplate = false
+    return image
+}
+
 let brewExecutableKey = "brewExecutable"
 
-struct Service {
+class Service: NSObject {
     var name = ""
     var state = "unknown" // "started", "stopped", "none", "error", "unknown"
     var user = ""
+
+    init(name: String, state: String, user: String) {
+        self.name = name
+        self.state = state
+        self.user = user
+    }
 }
 
 enum BrewServicesMenubarErrors: Error {
@@ -22,13 +51,14 @@ enum BrewServicesMenubarErrors: Error {
 }
 
 @NSApplicationMain
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @IBOutlet weak var statusMenu: NSMenu!
 
     // Returns a status item from the system menu bar of variable length
     let statusItem = NSStatusBar.system.statusItem(withLength: -1)
     var services: [Service]?
+    var isMenuOpen = false
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // Homebrew can now be located in two different locations depending on how it was installed and what architecture the computer is running
@@ -49,6 +79,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             button.image = icon
             button.action = #selector(AppDelegate.handleMenuOpen(_:))
+            statusItem.menu = statusMenu
+            statusMenu.delegate = self
         }
 
         queryServicesAndUpdateMenu()
@@ -57,17 +89,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     //
     // Event handlers for UI actions
     //
-    @objc func handleClick(_ sender: NSMenuItem) {
-        if sender.state == NSControl.StateValue.off {
-            controlService(sender.title, state: "start")
-        } else {
-            controlService(sender.title, state: "stop")
+    @objc func handleClick(_ sender: Any) {
+        // Get the service name from the view
+        var serviceName: String?
+
+        if let view = sender as? LiquidGlassMenuItemView {
+            serviceName = view.title
+        }
+
+        // Find the actual service state to toggle it properly
+        if let serviceName = serviceName, let services = services {
+            if let service = services.first(where: { $0.name == serviceName }) {
+                if service.state == "started" {
+                    controlService(serviceName, state: "stop")
+                } else {
+                    controlService(serviceName, state: "start")
+                }
+            }
         }
     }
 
-    @objc func handleRestartClick(_ sender: NSMenuItem) {
-        let service = sender.representedObject as! Service
-        controlService(service.name, state: "restart")
+    @objc func handleRestartClick(_ sender: Any) {
+        // Get the service from the menu item's representedObject
+        var service: Service?
+
+        if let menuItem = sender as? NSMenuItem {
+            service = menuItem.representedObject as? Service
+        }
+
+        if let service = service {
+            controlService(service.name, state: "restart")
+        }
     }
 
     @objc func handleStartAll(_ sender: NSMenuItem) {
@@ -87,108 +139,223 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func handleMenuOpen(_ sender: AnyObject?) {
+        isMenuOpen = true
         queryServicesAndUpdateMenu()
-        statusItem.popUpMenu(statusMenu)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+    }
+
+    //
+    // Update existing menu items in place (when menu is open)
+    //
+    func updateMenuInPlace() {
+        guard let services = services else { return }
+
+        let user = NSUserName()
+
+        // Update each service item
+        for (index, service) in services.enumerated() {
+            let itemIndex = index * 2 // Each service has a main item and an alternate item
+
+            if itemIndex < statusMenu.items.count {
+                let menuItem = statusMenu.items[itemIndex]
+
+                // Update the dot color based on current state
+                let dotColor: NSColor
+                switch service.state {
+                case "started":
+                    dotColor = .systemGreen
+                case "stopped", "none":
+                    dotColor = .systemRed
+                case "unknown":
+                    dotColor = .systemYellow
+                default:
+                    dotColor = .systemYellow
+                }
+
+                // Update the custom view's dot color
+                if let customView = menuItem.view as? LiquidGlassMenuItemView {
+                    customView.updateDotColor(dotColor)
+                }
+
+                // Update enabled state
+                let isEnabled = !(service.user != "" && service.user != user)
+                menuItem.isEnabled = isEnabled
+
+                // Update alternate item too
+                if itemIndex + 1 < statusMenu.items.count {
+                    let altMenuItem = statusMenu.items[itemIndex + 1]
+                    if let altCustomView = altMenuItem.view as? LiquidGlassMenuItemView {
+                        altCustomView.updateDotColor(dotColor)
+                    }
+                    altMenuItem.isEnabled = isEnabled
+                }
+            }
+        }
     }
 
     //
     // Update menu of services
     //
-    func updateMenu(refreshing: Bool = false, notFound: Bool = false, error: Bool = false) {
+    func updateMenu(notFound: Bool = false, error: Bool = false) {
         statusMenu.removeAllItems()
 
         if notFound {
-            let item = NSMenuItem.init(title: "Homebrew not found", action: nil, keyEquivalent: "")
-            item.isEnabled = false
+            let item = LiquidGlassMenuItemView.menuItem(
+                title: "Homebrew not found",
+                dotColor: nil,
+                isEnabled: false,
+                action: nil,
+                target: nil,
+                accessoryText: nil
+            )
             statusMenu.addItem(item)
         }
         else if error {
-            let item = NSMenuItem.init(title: "Homebrew error", action: nil, keyEquivalent: "")
-            item.isEnabled = false
+            let item = LiquidGlassMenuItemView.menuItem(
+                title: "Homebrew error",
+                dotColor: nil,
+                isEnabled: false,
+                action: nil,
+                target: nil,
+                accessoryText: nil
+            )
             statusMenu.addItem(item)
         }
         else if let services = services {
             let user = NSUserName()
             for service in services {
-                let item = NSMenuItem.init(title: service.name, action: nil, keyEquivalent: "")
-
-                if service.state == "started" {
-                    item.state = NSControl.StateValue.on
-                } else if service.state == "stopped"  || service.state == "none" {
-                    item.state = NSControl.StateValue.off
-                } else {
-                    item.state = NSControl.StateValue.mixed
+                // Add colored status dot before the service name
+                let dotColor: NSColor
+                switch service.state {
+                case "started":
+                    dotColor = .systemGreen
+                case "stopped", "none":
+                    dotColor = .systemRed
+                case "unknown":
+                    dotColor = .systemYellow
+                default:
+                    dotColor = .systemYellow
                 }
 
-                if service.user != "" && service.user != user {
-                    item.isEnabled = false
-                }
+                let isEnabled = !(service.user != "" && service.user != user)
 
-                if item.isEnabled {
-                    item.action = #selector(AppDelegate.handleClick(_:))
-                }
+                // Use LiquidGlassMenuItemView for custom menu items that don't auto-close
+                let item = LiquidGlassMenuItemView.menuItem(
+                    title: service.name,
+                    dotColor: dotColor,
+                    isEnabled: isEnabled,
+                    action: isEnabled ? #selector(AppDelegate.handleClick(_:)) : nil,
+                    target: isEnabled ? self : nil,
+                    accessoryText: nil
+                )
 
                 statusMenu.addItem(item)
 
-                let altItem = NSMenuItem.init(title: "Restart "+service.name, action: #selector(AppDelegate.handleRestartClick(_:)), keyEquivalent: "")
+                // Create alternate "Restart" item
+                let altItem = LiquidGlassMenuItemView.menuItem(
+                    title: "Restart " + service.name,
+                    dotColor: dotColor,
+                    isEnabled: isEnabled,
+                    action: isEnabled ? #selector(AppDelegate.handleRestartClick(_:)) : nil,
+                    target: isEnabled ? self : nil,
+                    accessoryText: nil
+                )
+                // Store the service object for later retrieval
                 altItem.representedObject = service
-                altItem.state = item.state
-                altItem.isEnabled = item.isEnabled
                 altItem.isAlternate = true
                 altItem.isHidden = true
                 altItem.keyEquivalentModifierMask = .option
                 statusMenu.addItem(altItem)
             }
             if services.count == 0 {
-                let item = NSMenuItem.init(title: "No services available", action: nil, keyEquivalent: "")
-                item.isEnabled = false
+                let item = LiquidGlassMenuItemView.menuItem(
+                    title: "No services available",
+                    dotColor: nil,
+                    isEnabled: false,
+                    action: nil,
+                    target: nil,
+                    accessoryText: nil
+                )
                 statusMenu.addItem(item)
             }
             else {
                 statusMenu.addItem(.separator())
-                statusMenu.addItem(
-                    .init(title: "Start all", action:#selector(AppDelegate.handleStartAll(_:)), keyEquivalent: "s")
+
+                let startAllItem = LiquidGlassMenuItemView.menuItem(
+                    title: "Start all",
+                    dotColor: nil,
+                    isEnabled: true,
+                    action: #selector(AppDelegate.handleStartAll(_:)),
+                    target: self,
+                    accessoryText: "⌘S"
                 )
-                statusMenu.addItem(
-                    .init(title: "Stop all", action:#selector(AppDelegate.handleStopAll(_:)), keyEquivalent: "x")
+                statusMenu.addItem(startAllItem)
+
+                let stopAllItem = LiquidGlassMenuItemView.menuItem(
+                    title: "Stop all",
+                    dotColor: nil,
+                    isEnabled: true,
+                    action: #selector(AppDelegate.handleStopAll(_:)),
+                    target: self,
+                    accessoryText: "⌘X"
                 )
-                statusMenu.addItem(
-                    .init(title: "Restart all", action:#selector(AppDelegate.handleRestartAll(_:)), keyEquivalent: "r")
+                statusMenu.addItem(stopAllItem)
+
+                let restartAllItem = LiquidGlassMenuItemView.menuItem(
+                    title: "Restart all",
+                    dotColor: nil,
+                    isEnabled: true,
+                    action: #selector(AppDelegate.handleRestartAll(_:)),
+                    target: self,
+                    accessoryText: "⌘R"
                 )
+                statusMenu.addItem(restartAllItem)
             }
         }
 
-        statusMenu.addItem(.separator())
-        statusMenu.addItem(
-            .init(title: "Quit", action:#selector(AppDelegate.handleQuit(_:)), keyEquivalent: "q")
-        )
+        statusMenu.addItem(LiquidGlassMenuItemView.separator())
 
-        if refreshing {
-            statusMenu.addItem(.separator())
-            let item = NSMenuItem.init(title: "Refreshing...", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            statusMenu.addItem(item)
-        }
+        let quitItem = LiquidGlassMenuItemView.menuItem(
+            title: "Quit",
+            dotColor: nil,
+            isEnabled: true,
+            action: #selector(AppDelegate.handleQuit(_:)),
+            target: self,
+            accessoryText: "⌘Q"
+        )
+        statusMenu.addItem(quitItem)
     }
 
     func queryServicesAndUpdateMenu() {
         do {
             let launchPath = try self.brewExecutable()
 
-            updateMenu(refreshing: true)
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let result = try self.serviceStates(launchPath: launchPath)
                     DispatchQueue.main.async {
                         self.services = result
-                        self.updateMenu()
+
+                        // If menu is open, update in place; otherwise rebuild
+                        if self.isMenuOpen {
+                            self.updateMenuInPlace()
+                        } else {
+                            self.updateMenu()
+                        }
                     }
                 } catch {
-                    self.updateMenu(error: true)
+                    if !self.isMenuOpen {
+                        self.updateMenu(error: true)
+                    }
                 }
             }
         } catch {
-            updateMenu(notFound: true)
+            if !isMenuOpen {
+                updateMenu(notFound: true)
+            }
         }
     }
 
@@ -244,7 +411,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            self.queryServicesAndUpdateMenu()
+            // Delay the menu update to avoid conflicts with menu being open
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.queryServicesAndUpdateMenu()
+            }
         }
     }
 
@@ -283,7 +453,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func parseService(_ raw:String) -> Service {
         let parts = raw.components(separatedBy: " ").filter() { $0 != "" }
         return Service(
-            name: parts[0],
+            name: parts.count >= 1 ? parts[0] : "",
             state: parts.count >= 2 ? parts[1] : "unknown",
             user: parts.count >= 3 ? parts[2] : ""
         )
